@@ -92,6 +92,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 	protected final KeyedDeserializationSchema<T> deserializer;
 
 	/** The set of topic partitions that the source will read, with their initial offsets to start reading from */
+	// Each thread(subtask) has its own subscribedPartitionsToStartOffsets Map
 	private Map<KafkaTopicPartition, Long> subscribedPartitionsToStartOffsets;
 	
 	/** Optional timestamp extractor / watermark generator that will be run per Kafka partition,
@@ -348,9 +349,10 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 		}
 
 		// initialize subscribed partitions
-		List<KafkaTopicPartition> kafkaTopicPartitions = getKafkaPartitions(topics);
+		List<KafkaTopicPartition> kafkaTopicPartitions = getKafkaPartitions(topics); // total partitions
 		Preconditions.checkNotNull(kafkaTopicPartitions, "TopicPartitions must not be null.");
 
+		// start offsets of all topic partitions of current subtask(thread) to read
 		subscribedPartitionsToStartOffsets = new HashMap<>(kafkaTopicPartitions.size());
 
 		if (restoredState != null) {
@@ -699,6 +701,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 			Map<KafkaTopicPartition, Long> specificStartupOffsets) {
 
 		for (int i = 0; i < kafkaTopicPartitions.size(); i++) {
+			// set offsets of partitions which the current thread deals with
 			if (i % numParallelSubtasks == indexOfThisSubtask) {
 				if (startupMode != StartupMode.SPECIFIC_OFFSETS) {
 					subscribedPartitionsToStartOffsets.put(kafkaTopicPartitions.get(i), startupMode.getStateSentinel());
