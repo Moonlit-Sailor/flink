@@ -61,7 +61,7 @@ public abstract class AbstractFetcher<T, KPH> {
 	 * from the view of taking a checkpoint */
 	protected final Object checkpointLock;
 
-	/** All partitions (and their state) that this fetcher is subscribed to */
+	/** All partitions (and their state, such as offset of the partition) that this fetcher is subscribed to */
 	private final KafkaTopicPartitionState<KPH>[] subscribedPartitionStates;
 
 	/** The mode describing whether the fetcher also generates timestamps and watermarks */
@@ -186,8 +186,8 @@ public abstract class AbstractFetcher<T, KPH> {
 
 	/**
 	 * Takes a snapshot of the partition offsets.
-	 * 
-	 * <p>Important: This method mus be called under the checkpoint lock.
+	 * Save each kafka topic partition and its corresponding offset
+	 * <p>Important: This method must be called under the checkpoint lock.
 	 * 
 	 * @return A map from partition to current offset.
 	 */
@@ -342,6 +342,7 @@ public abstract class AbstractFetcher<T, KPH> {
 		if (nextWatermark.getTimestamp() > maxWatermarkSoFar) {
 			long newMin = Long.MAX_VALUE;
 
+			// scan all partitions and get the smallest watermark
 			for (KafkaTopicPartitionState<?> state : subscribedPartitionStates) {
 				@SuppressWarnings("unchecked")
 				final KafkaTopicPartitionStateWithPunctuatedWatermarks<T, KPH> withWatermarksState =
@@ -370,6 +371,7 @@ public abstract class AbstractFetcher<T, KPH> {
 	 * Utility method that takes the topic partitions and creates the topic partition state
 	 * holders. If a watermark generator per partition exists, this will also initialize those.
 	 */
+	// use the assignedPartitionsToInitialOffsets Map to build each partition along with their offset, return an Array
 	private KafkaTopicPartitionState<KPH>[] initializeSubscribedPartitionStates(
 			Map<KafkaTopicPartition, Long> assignedPartitionsToInitialOffsets,
 			int timestampWatermarkMode,
