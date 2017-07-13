@@ -189,7 +189,7 @@ public class KafkaConsumerThread extends Thread {
 					// to the committed group offset, so we do not need to do it.
 
 					partition.setOffset(consumer.position(partition.getKafkaPartitionHandle()) - 1);
-				} else {
+				} else { // for the Specialized Offset
 					consumer.seek(partition.getKafkaPartitionHandle(), partition.getOffset() + 1);
 				}
 			}
@@ -222,6 +222,7 @@ public class KafkaConsumerThread extends Thread {
 				// get the next batch of records, unless we did not manage to hand the old batch over
 				if (records == null) {
 					try {
+						// this will fetch records and update the offsets to the latest position
 						records = consumer.poll(pollTimeout);
 					}
 					catch (WakeupException we) {

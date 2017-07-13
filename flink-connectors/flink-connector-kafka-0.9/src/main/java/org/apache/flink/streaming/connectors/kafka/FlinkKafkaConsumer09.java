@@ -226,7 +226,7 @@ public class FlinkKafkaConsumer09<T> extends FlinkKafkaConsumerBase<T> {
 			throw new RuntimeException("Unable to retrieve any partitions for the requested topics " + topics);
 		}
 
-		// we now have a list of partitions which is the same for all parallel consumer instances.
+		// we now have a list of partitions which is the same for all parallel consumer instances. (total view)
 		LOG.info("Got {} partitions from these topics: {}", partitions.size(), topics);
 
 		if (LOG.isInfoEnabled()) {
