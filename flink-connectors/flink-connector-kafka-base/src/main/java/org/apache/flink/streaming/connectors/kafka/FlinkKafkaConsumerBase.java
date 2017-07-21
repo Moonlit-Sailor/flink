@@ -624,6 +624,8 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 					LOG.debug("Checkpoint state was empty.");
 					return;
 				}
+
+				// commit checkpointed offsets to Kafka broker
 				fetcher.commitInternalOffsetsToKafka(offsets);
 			} catch (Exception e) {
 				if (running) {

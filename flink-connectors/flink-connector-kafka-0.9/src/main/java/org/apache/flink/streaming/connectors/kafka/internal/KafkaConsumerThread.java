@@ -189,7 +189,7 @@ public class KafkaConsumerThread extends Thread {
 					// to the committed group offset, so we do not need to do it.
 
 					partition.setOffset(consumer.position(partition.getKafkaPartitionHandle()) - 1);
-				} else { // for the Specialized Offset
+				} else { // for the Specialized Offset and checkpoint / savepoint state
 					consumer.seek(partition.getKafkaPartitionHandle(), partition.getOffset() + 1);
 				}
 			}
