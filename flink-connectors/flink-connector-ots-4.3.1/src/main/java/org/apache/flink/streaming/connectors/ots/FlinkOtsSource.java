@@ -52,7 +52,6 @@ import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedRestoring;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.api.watermark.Watermark;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,7 +140,9 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 
 		if(streamId != null) {
 			partitions = new HashSet<>();
-			if (restoredState != null) {
+			if (restoredState != null &&
+				!restoredState.isEmpty() &&
+				restoredState.get(0).getStreamId().equals(streamId)) {
 				for (OtsStreamPartitionState partition : restoredState) {
 					partitions.add(partition);
 				}
@@ -172,9 +173,9 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 					GetStreamRecordRequest streamRecordRequest;
 
 					long offset = partition.getOffset();
-					int times = (int) (offset / Integer.MAX_VALUE);
+					long times = offset / Integer.MAX_VALUE;
 					int mod = (int) (offset % Integer.MAX_VALUE);
-					for (int i =0 ;i < times; ++i) {
+					for (long i =0 ;i < times; ++i) {
 						streamRecordRequest = new GetStreamRecordRequest(iter);
 						streamRecordRequest.setLimit(Integer.MAX_VALUE);
 						iter = syncClient.getStreamRecord(streamRecordRequest).getNextShardIterator();
@@ -192,7 +193,7 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 	@Override
 	public void run(SourceContext<StreamRecord> ctx) throws Exception {
 		if (partitions == null) {
-			throw new Exception("The partitions were not set for the reader");
+			throw new Exception("The partitions were not set for the source to read");
 		}
 		String iter;
 		List<StreamRecord> streamRecords;
@@ -205,106 +206,119 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 			streamId,
 			updatedShards);
 
-		shardFetcherThread.start();
+		try {
+			shardFetcherThread.start();
 
-		while (running) {
-			if (!partitions.isEmpty()) {
-				for (OtsStreamPartitionState partition : partitions) {
-					if (partitionToStartOffset.containsKey(partition.getStreamShard().getShardId())) {
-						iter = partitionToStartOffset.get(partition.getStreamShard().getShardId());
-					}
-					else { // start from offset 0
-						if (partition.getStreamShard().getParentId() != null) {
-							// check if its parent is finished
-							if (!checkPartitionFinished(partition.getStreamShard().getParentId())) {
-								continue;
+			while (running) {
+				if (!partitions.isEmpty()) {
+					for (OtsStreamPartitionState partition : partitions) {
+						if (partitionToStartOffset.containsKey(partition.getStreamShard().getShardId())) {
+							iter = partitionToStartOffset.get(partition.getStreamShard().getShardId());
+						} else { // start from offset 0
+							if (partition.getStreamShard().getParentId() != null) {
+								// check if its parent is finished
+								if (!checkPartitionFinished(partition.getStreamShard().getParentId())) {
+									continue;
+								}
+							}
+							if (partition.getStreamShard().getParentSiblingId() != null) {
+								if (!checkPartitionFinished(partition.getStreamShard().getParentSiblingId())) {
+									continue;
+								}
+							}
+
+							// set the iter to the beginning of the shard, and get ready to read
+							GetShardIteratorRequest getShardIterRequest =
+								new GetShardIteratorRequest(
+									partition.getStreamId(),
+									partition.getStreamShard().getShardId());
+
+							iter = syncClient.getShardIterator(getShardIterRequest).getShardIterator();
+						}
+						if (iter == null) { // reach the end of this partition
+							// set this partition as already read
+							PrimaryKeyBuilder primaryKeyBuilder = PrimaryKeyBuilder.createPrimaryKeyBuilder();
+							primaryKeyBuilder.addPrimaryKeyColumn(
+								"shardId",
+								PrimaryKeyValue.fromString(partition.getStreamShard().getShardId()));
+							PrimaryKey primaryKey = primaryKeyBuilder.build();
+							RowUpdateChange rowUpdateChange =
+								new RowUpdateChange(shardStateTableName, primaryKey);
+							rowUpdateChange.put(new Column("finished", ColumnValue.fromBoolean(true)));
+							syncClient.updateRow(new UpdateRowRequest(rowUpdateChange));
+							// TODO: if we need to remove the finished partition from the list and map
+							// partitionToStartOffset.remove(partition.getStreamShard().getShardId());
+							// this.partitions remove this partition
+							continue;
+						}
+						GetStreamRecordRequest request = new GetStreamRecordRequest(iter);
+						GetStreamRecordResponse response = syncClient.getStreamRecord(request);
+						streamRecords = response.getRecords();
+						partitionToStartOffset.put(
+							partition.getStreamShard().getShardId(),
+							response.getNextShardIterator());
+						for (int i = 0; i < streamRecords.size(); ++i) {
+							synchronized (ctx.getCheckpointLock()) {
+								ctx.collect(streamRecords.get(i));
+								partition.setOffset(partition.getOffset() + 1);
 							}
 						}
-						if (partition.getStreamShard().getParentSiblingId() != null) {
-							if (!checkPartitionFinished(partition.getStreamShard().getParentSiblingId())) {
-								continue;
-							}
-						}
-
-						// set the iter to the beginning of the shard, and get ready to read
-						GetShardIteratorRequest getShardIterRequest =
-							new GetShardIteratorRequest(
-								partition.getStreamId(),
-								partition.getStreamShard().getShardId());
-
-						iter = syncClient.getShardIterator(getShardIterRequest).getShardIterator();
 					}
-					if (iter == null) { // reach the end of this partition
-						// set this partition as already read
-						PrimaryKeyBuilder primaryKeyBuilder = PrimaryKeyBuilder.createPrimaryKeyBuilder();
-						primaryKeyBuilder.addPrimaryKeyColumn(
-							"shardId",
-							PrimaryKeyValue.fromString(partition.getStreamShard().getShardId()));
-						PrimaryKey primaryKey = primaryKeyBuilder.build();
-						RowUpdateChange rowUpdateChange =
-							new RowUpdateChange(shardStateTableName, primaryKey);
-						rowUpdateChange.put(new Column("finished", ColumnValue.fromBoolean(true)));
-						syncClient.updateRow(new UpdateRowRequest(rowUpdateChange));
-						// TODO: if we need to remove the finished partition from the list and map
-						// partitionToStartOffset.remove(partition.getStreamShard().getShardId());
-						// this.partitions remove this partition
-						continue;
-					}
-					GetStreamRecordRequest request = new GetStreamRecordRequest(iter);
-					GetStreamRecordResponse response = syncClient.getStreamRecord(request);
-					streamRecords = response.getRecords();
-					partitionToStartOffset.put(
-						partition.getStreamShard().getShardId(),
-						response.getNextShardIterator());
-					for (int i = 0; i < streamRecords.size(); ++i) {
-						synchronized (ctx.getCheckpointLock()) {
-							ctx.collect(streamRecords.get(i));
-							partition.setOffset(partition.getOffset() + 1);
-						}
-					}
-				}
 
-			} else {
-				ctx.emitWatermark(new Watermark(Long.MAX_VALUE));
+				} else {
+					// ctx.emitWatermark(new Watermark(Long.MAX_VALUE));
 
-				// wait until this is canceled
-				final Object waitLock = new Object();
-				while (running) {
+					// wait a certain interval and read the list<StreamShard> from ots again
+					final int updateInterval = 60000;
 					try {
-						//noinspection SynchronizationOnLocalVariableOrMethodParameter
-						synchronized (waitLock) {
-							waitLock.wait();
-						}
+						Thread.sleep(updateInterval);
 					}
 					catch (InterruptedException e) {
 						if (!running) {
-							// restore the interrupted state, and fall through the loop
+							// restore the interrupted state
 							Thread.currentThread().interrupt();
 						}
 					}
 				}
-			}
-			// timely inspection get a whole shard list and distribute new shards
-			updatedShardList = updatedShards.getAndSet(null);
-			if (updatedShardList != null) {
-				for (StreamShard shard : updatedShardList) {
-					OtsStreamPartitionState partitionState =
-						new OtsStreamPartitionState(streamId, shard, 0L);
+				if (!running) {
+					return;
+				}
+				// periodically inspection get a whole shard list and assign new shards
+				updatedShardList = updatedShards.getAndSet(null);
+				if (updatedShardList != null) {
+					for (StreamShard shard : updatedShardList) {
+						OtsStreamPartitionState partitionState =
+							new OtsStreamPartitionState(streamId, shard, 0L);
 
-					if (!partitions.contains(partitionState)) {
-						// add new partition to this subtask
 						synchronized (ctx.getCheckpointLock()) {
-							partitions.add(partitionState);
+							if (!partitions.contains(partitionState)) {
+								// add new partition to this subtask
+								partitions.add(partitionState);
+							}
 						}
 					}
 				}
-			}
-		} // end while
+			} // end while
+		}
+		finally {
+			shardFetcherThread.shutdown();
+		}
+		try {
+			shardFetcherThread.join();
+		}
+		catch (InterruptedException e) {
+			// restore the interrupted state
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	@Override
 	public void cancel() {
 		running = false;
+
+		if (shardFetcherThread != null) {
+			shardFetcherThread.shutdown();
+		}
 	}
 
 	@Override
@@ -312,9 +326,6 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 		// pretty much the same logic as cancelling
 		try {
 			cancel();
-			if (shardFetcherThread != null) {
-				shardFetcherThread.shutdown();
-			}
 		} finally {
 			super.close();
 		}
