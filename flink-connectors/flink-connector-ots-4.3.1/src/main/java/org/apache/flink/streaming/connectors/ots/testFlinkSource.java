@@ -29,10 +29,11 @@ public class testFlinkSource {
 		String accessKey = "Uk0vevvK02TYhPd16A62pOjgMr9hOA";
 		String instanceId = "testDB";
 		String tableName = "score";
+		String stateTable = "streamShardState";
 		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 		DataStream<StreamRecord> source =
 			env.addSource(
-				new FlinkOtsSource(endPoint, accessKeyId, accessKey, instanceId, tableName));
+				new FlinkOtsSource(endPoint, accessKeyId, accessKey, instanceId, tableName, stateTable));
 		DataStream<Long> age = source.map(new MapFunction<StreamRecord, Long>() {
 			@Override
 			public Long map(StreamRecord value) throws Exception {

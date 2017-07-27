@@ -47,4 +47,24 @@ public class OtsStreamPartitionState implements Serializable{
 		this.offset = offset;
 	}
 
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) {
+			return true;
+		}
+		else if (o instanceof OtsStreamPartitionState) {
+			OtsStreamPartitionState temp = (OtsStreamPartitionState) o;
+			return streamId.equals(temp.getStreamId()) &&
+				streamShard.getShardId().equals(temp.getStreamShard().getShardId());
+		}
+		else {
+			return false;
+		}
+	}
+
+	@Override
+	public int hashCode() {
+		return 31 * streamId.hashCode() + streamShard.getShardId().hashCode();
+	}
+
 }

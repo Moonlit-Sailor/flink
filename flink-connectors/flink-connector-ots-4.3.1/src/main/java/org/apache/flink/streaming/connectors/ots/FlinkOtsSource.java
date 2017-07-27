@@ -19,17 +19,29 @@ package org.apache.flink.streaming.connectors.ots;
 
 
 import com.alicloud.openservices.tablestore.SyncClient;
+import com.alicloud.openservices.tablestore.model.Column;
+import com.alicloud.openservices.tablestore.model.ColumnValue;
+import com.alicloud.openservices.tablestore.model.PrimaryKey;
+import com.alicloud.openservices.tablestore.model.PrimaryKeyBuilder;
+import com.alicloud.openservices.tablestore.model.PrimaryKeyValue;
+import com.alicloud.openservices.tablestore.model.Row;
+import com.alicloud.openservices.tablestore.model.RowUpdateChange;
+import com.alicloud.openservices.tablestore.model.SingleRowQueryCriteria;
 import com.alicloud.openservices.tablestore.model.Stream;
 import com.alicloud.openservices.tablestore.model.StreamShard;
+import com.alicloud.openservices.tablestore.model.StreamStatus;
 import com.alicloud.openservices.tablestore.model.StreamRecord;
 import com.alicloud.openservices.tablestore.model.ListStreamRequest;
 import com.alicloud.openservices.tablestore.model.ListStreamResponse;
 import com.alicloud.openservices.tablestore.model.DescribeStreamRequest;
 import com.alicloud.openservices.tablestore.model.DescribeStreamResponse;
+import com.alicloud.openservices.tablestore.model.GetRowRequest;
+import com.alicloud.openservices.tablestore.model.GetRowResponse;
 import com.alicloud.openservices.tablestore.model.GetShardIteratorRequest;
 import com.alicloud.openservices.tablestore.model.GetShardIteratorResponse;
 import com.alicloud.openservices.tablestore.model.GetStreamRecordRequest;
 import com.alicloud.openservices.tablestore.model.GetStreamRecordResponse;
+import com.alicloud.openservices.tablestore.model.UpdateRowRequest;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.OperatorStateStore;
@@ -48,6 +60,8 @@ import java.util.List;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -61,6 +75,8 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 	private String accessKey;
 	private String instanceId;
 	private String tableName;
+	private String streamId;
+	private String shardStateTableName;
 	private SyncClient syncClient;
 
 	/** Flag indicating whether the subtask is still running **/
@@ -71,7 +87,7 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 	 * Map[shardId -> shardIterator] **/
 	private Map<String, String> partitionToStartOffset;
 
-	private List<OtsStreamPartitionState> partitions;
+	private HashSet<OtsStreamPartitionState> partitions;
 
 	private transient ListState<OtsStreamPartitionState> offsetsStateForCheckpoint;
 
@@ -80,18 +96,24 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 
 	private static final Logger LOG = LoggerFactory.getLogger(FlinkOtsSource.class);
 
+	/** attain updated shard list of this subtask from shardFetcher thread **/
+	private final AtomicReference<List<StreamShard>> updatedShards = new AtomicReference<>();
+
+	private OtsStreamShardFetcherThread shardFetcherThread;
 
 	public FlinkOtsSource(
 		String endPoint,
 		String accessKeyId,
 		String accessKey,
 		String instanceId,
-		String tableName) {
+		String tableName,
+		String shardStateTableName) {
 		this.endPoint = checkNotNull(endPoint);
 		this.accessKeyId = checkNotNull(accessKeyId);
 		this.accessKey = checkNotNull(accessKey);
 		this.instanceId = checkNotNull(instanceId);
 		this.tableName = checkNotNull(tableName);
+		this.shardStateTableName = checkNotNull(shardStateTableName);
 	}
 
 
@@ -102,29 +124,40 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 		syncClient.listStream(listStreamRequest);
 		ListStreamResponse result = syncClient.listStream(listStreamRequest);
 		List<Stream> streams = result.getStreams();
-		String streamId = streams.get(0).getStreamId();
-		if(streamId != null){
-			DescribeStreamRequest desRequest = new DescribeStreamRequest(streamId);
-			DescribeStreamResponse response = syncClient.describeStream(desRequest);
+		streamId = null;
 
-			partitions = new LinkedList<>();
+		DescribeStreamRequest desRequest;
+		DescribeStreamResponse response = null;
+
+		for (Stream stream : streams) {
+			desRequest = new DescribeStreamRequest(stream.getStreamId());
+			response = syncClient.describeStream(desRequest);
+			// get the Active stream
+			if (response.getStatus().compareTo(StreamStatus.ACTIVE) == 0) {
+				streamId = stream.getStreamId();
+				break;
+			}
+		}
+
+		if(streamId != null) {
+			partitions = new HashSet<>();
 			if (restoredState != null) {
 				for (OtsStreamPartitionState partition : restoredState) {
 					partitions.add(partition);
 				}
 
-				return;
+			} else { // read from the beginning of every shards
+				// start offsets of all stream shards of current subtask(thread) to read
+				initializeStartOffset(
+					streamId,
+					partitions,
+					response.getShards(),
+					getRuntimeContext().getIndexOfThisSubtask(),
+					getRuntimeContext().getNumberOfParallelSubtasks());
 			}
-			// start offsets of all stream shards of current subtask(thread) to read
-			initializeStartOffset(
-				streamId,
-				partitions,
-				response.getShards(),
-				getRuntimeContext().getIndexOfThisSubtask(),
-				getRuntimeContext().getNumberOfParallelSubtasks());
 
+			partitionToStartOffset = new HashMap<>(partitions.size());
 			if (!partitions.isEmpty()) {
-				partitionToStartOffset = new HashMap<>(partitions.size());
 				for (OtsStreamPartitionState partition : partitions) {
 					if (partition.getOffset() == 0L) { // start from the beginning
 						continue;
@@ -163,19 +196,59 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 		}
 		String iter;
 		List<StreamRecord> streamRecords;
+		List<StreamShard> updatedShardList;
+
+		shardFetcherThread = new OtsStreamShardFetcherThread(
+			getRuntimeContext().getIndexOfThisSubtask(),
+			getRuntimeContext().getNumberOfParallelSubtasks(),
+			syncClient,
+			streamId,
+			updatedShards);
+
+		shardFetcherThread.start();
+
 		while (running) {
 			if (!partitions.isEmpty()) {
 				for (OtsStreamPartitionState partition : partitions) {
 					if (partitionToStartOffset.containsKey(partition.getStreamShard().getShardId())) {
 						iter = partitionToStartOffset.get(partition.getStreamShard().getShardId());
 					}
-					else {
+					else { // start from offset 0
+						if (partition.getStreamShard().getParentId() != null) {
+							// check if its parent is finished
+							if (!checkPartitionFinished(partition.getStreamShard().getParentId())) {
+								continue;
+							}
+						}
+						if (partition.getStreamShard().getParentSiblingId() != null) {
+							if (!checkPartitionFinished(partition.getStreamShard().getParentSiblingId())) {
+								continue;
+							}
+						}
+
+						// set the iter to the beginning of the shard, and get ready to read
 						GetShardIteratorRequest getShardIterRequest =
 							new GetShardIteratorRequest(
 								partition.getStreamId(),
 								partition.getStreamShard().getShardId());
 
 						iter = syncClient.getShardIterator(getShardIterRequest).getShardIterator();
+					}
+					if (iter == null) { // reach the end of this partition
+						// set this partition as already read
+						PrimaryKeyBuilder primaryKeyBuilder = PrimaryKeyBuilder.createPrimaryKeyBuilder();
+						primaryKeyBuilder.addPrimaryKeyColumn(
+							"shardId",
+							PrimaryKeyValue.fromString(partition.getStreamShard().getShardId()));
+						PrimaryKey primaryKey = primaryKeyBuilder.build();
+						RowUpdateChange rowUpdateChange =
+							new RowUpdateChange(shardStateTableName, primaryKey);
+						rowUpdateChange.put(new Column("finished", ColumnValue.fromBoolean(true)));
+						syncClient.updateRow(new UpdateRowRequest(rowUpdateChange));
+						// TODO: if we need to remove the finished partition from the list and map
+						// partitionToStartOffset.remove(partition.getStreamShard().getShardId());
+						// this.partitions remove this partition
+						continue;
 					}
 					GetStreamRecordRequest request = new GetStreamRecordRequest(iter);
 					GetStreamRecordResponse response = syncClient.getStreamRecord(request);
@@ -211,7 +284,22 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 					}
 				}
 			}
-		}
+			// timely inspection get a whole shard list and distribute new shards
+			updatedShardList = updatedShards.getAndSet(null);
+			if (updatedShardList != null) {
+				for (StreamShard shard : updatedShardList) {
+					OtsStreamPartitionState partitionState =
+						new OtsStreamPartitionState(streamId, shard, 0L);
+
+					if (!partitions.contains(partitionState)) {
+						// add new partition to this subtask
+						synchronized (ctx.getCheckpointLock()) {
+							partitions.add(partitionState);
+						}
+					}
+				}
+			}
+		} // end while
 	}
 
 	@Override
@@ -224,6 +312,9 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 		// pretty much the same logic as cancelling
 		try {
 			cancel();
+			if (shardFetcherThread != null) {
+				shardFetcherThread.shutdown();
+			}
 		} finally {
 			super.close();
 		}
@@ -231,15 +322,31 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 
 	private void initializeStartOffset(
 		String streamId,
-		List<OtsStreamPartitionState> partitions,
+		HashSet<OtsStreamPartitionState> partitions,
 		List<StreamShard> shards,
 		int indexOfThisSubtask,
 		int numParallelSubtasks) {
 		for (int i = 0; i < shards.size(); ++i) {
-			if (i % numParallelSubtasks == indexOfThisSubtask) {
+			if (shards.get(i).getShardId().hashCode() % numParallelSubtasks ==
+				indexOfThisSubtask) {
 				partitions.add(new OtsStreamPartitionState(streamId, shards.get(i), 0L));
 			}
 		}
+	}
+
+	private boolean checkPartitionFinished(String shardId) {
+		PrimaryKeyBuilder primaryKeyBuilder = PrimaryKeyBuilder.createPrimaryKeyBuilder();
+		primaryKeyBuilder.addPrimaryKeyColumn(
+			"shardId",
+			PrimaryKeyValue.fromString(shardId));
+		PrimaryKey primaryKey = primaryKeyBuilder.build();
+		SingleRowQueryCriteria criteria = new SingleRowQueryCriteria(shardStateTableName, primaryKey);
+		criteria.setMaxVersions(1);
+		criteria.addColumnsToGet("finished");
+		GetRowResponse getRowResponse = syncClient.getRow(new GetRowRequest(criteria));
+		Row row = getRowResponse.getRow();
+		return (row != null && row.contains("finished")) &&
+			row.getLatestColumn("finished").getValue().asBoolean();
 	}
 
 	// ------------------------------------------------------------------------
