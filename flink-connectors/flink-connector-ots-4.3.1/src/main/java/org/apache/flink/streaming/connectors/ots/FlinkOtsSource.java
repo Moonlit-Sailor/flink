@@ -81,11 +81,11 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 	/** Flag indicating whether the subtask is still running **/
 	private volatile boolean running = true;
 
-	/** The set of topic partitions that the source will read, with their initial offsets to start reading from.
-	 * Each thread(subtask) has its own partitionToStartOffset Map
+	/** Each thread(subtask) has its own partitionToStartOffset Map
 	 * Map[shardId -> shardIterator] **/
 	private Map<String, String> partitionToStartOffset;
 
+	/** The set of partitions that the source will read, with their offsets to start reading from. **/
 	private HashSet<OtsStreamPartitionState> partitions;
 
 	private transient ListState<OtsStreamPartitionState> offsetsStateForCheckpoint;
@@ -268,7 +268,7 @@ public class FlinkOtsSource extends RichParallelSourceFunction<StreamRecord> imp
 				} else {
 					// ctx.emitWatermark(new Watermark(Long.MAX_VALUE));
 
-					// wait a certain interval and read the list<StreamShard> from ots again
+					// wait a certain interval and get the list<StreamShard> from ots again
 					final int updateInterval = 60000;
 					try {
 						Thread.sleep(updateInterval);
