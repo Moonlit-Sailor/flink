@@ -17,6 +17,7 @@ package org.apache.flink.streaming.connectors.ots;
  * limitations under the License.
  */
 
+
 import com.alicloud.openservices.tablestore.SyncClient;
 import com.alicloud.openservices.tablestore.model.DescribeStreamRequest;
 import com.alicloud.openservices.tablestore.model.StreamShard;
@@ -24,6 +25,7 @@ import com.alicloud.openservices.tablestore.model.StreamShard;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+
 
 public class OtsStreamShardFetcherThread extends Thread{
 

@@ -17,11 +17,13 @@ package org.apache.flink.streaming.connectors.ots;
  * limitations under the License.
  */
 
+
 import com.alicloud.openservices.tablestore.model.StreamShard;
 
 import java.io.Serializable;
 
 import static java.util.Objects.requireNonNull;
+
 
 public class OtsStreamPartitionState implements Serializable{
 	private final String streamId;

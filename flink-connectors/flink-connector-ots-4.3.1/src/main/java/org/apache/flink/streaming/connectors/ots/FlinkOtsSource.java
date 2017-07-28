@@ -21,6 +21,16 @@ package org.apache.flink.streaming.connectors.ots;
 import com.alicloud.openservices.tablestore.SyncClient;
 import com.alicloud.openservices.tablestore.model.Column;
 import com.alicloud.openservices.tablestore.model.ColumnValue;
+import com.alicloud.openservices.tablestore.model.DescribeStreamRequest;
+import com.alicloud.openservices.tablestore.model.DescribeStreamResponse;
+import com.alicloud.openservices.tablestore.model.GetRowRequest;
+import com.alicloud.openservices.tablestore.model.GetRowResponse;
+import com.alicloud.openservices.tablestore.model.GetShardIteratorRequest;
+import com.alicloud.openservices.tablestore.model.GetShardIteratorResponse;
+import com.alicloud.openservices.tablestore.model.GetStreamRecordRequest;
+import com.alicloud.openservices.tablestore.model.GetStreamRecordResponse;
+import com.alicloud.openservices.tablestore.model.ListStreamRequest;
+import com.alicloud.openservices.tablestore.model.ListStreamResponse;
 import com.alicloud.openservices.tablestore.model.PrimaryKey;
 import com.alicloud.openservices.tablestore.model.PrimaryKeyBuilder;
 import com.alicloud.openservices.tablestore.model.PrimaryKeyValue;
@@ -31,16 +41,6 @@ import com.alicloud.openservices.tablestore.model.Stream;
 import com.alicloud.openservices.tablestore.model.StreamShard;
 import com.alicloud.openservices.tablestore.model.StreamStatus;
 import com.alicloud.openservices.tablestore.model.StreamRecord;
-import com.alicloud.openservices.tablestore.model.ListStreamRequest;
-import com.alicloud.openservices.tablestore.model.ListStreamResponse;
-import com.alicloud.openservices.tablestore.model.DescribeStreamRequest;
-import com.alicloud.openservices.tablestore.model.DescribeStreamResponse;
-import com.alicloud.openservices.tablestore.model.GetRowRequest;
-import com.alicloud.openservices.tablestore.model.GetRowResponse;
-import com.alicloud.openservices.tablestore.model.GetShardIteratorRequest;
-import com.alicloud.openservices.tablestore.model.GetShardIteratorResponse;
-import com.alicloud.openservices.tablestore.model.GetStreamRecordRequest;
-import com.alicloud.openservices.tablestore.model.GetStreamRecordResponse;
 import com.alicloud.openservices.tablestore.model.UpdateRowRequest;
 
 import org.apache.flink.api.common.state.ListState;
@@ -55,11 +55,11 @@ import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunctio
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.Map;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
